@@ -1,5 +1,11 @@
 package pdc;
 
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+
 /**
  * Message represents the communication unit in the CSM218 protocol.
  * 
@@ -15,6 +21,22 @@ public class Message {
     public String sender;
     public long timestamp;
     public byte[] payload;
+
+    public static void packString(String msg, OutputStream out) throws IOException{
+        byte[] data = msg.getBytes("UTF-8");
+        DataOutputStream dos = new DataOutputStream(out);
+        dos.writeInt(data.length);
+        dos.write(data);
+        dos.flush();
+    }
+
+    public static String unpackString(InputStream in) throws IOException {
+        DataInputStream dis = new DataInputStream(in);
+        int len = dis.readInt();
+        byte[] data = new byte[len];
+        dis.readFully(data);
+        return new String(data, "UTF-8");
+    }
 
     public Message() {
     }

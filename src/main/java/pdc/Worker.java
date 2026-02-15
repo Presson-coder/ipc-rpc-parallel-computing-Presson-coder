@@ -1,5 +1,9 @@
 package pdc;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.ServerSocket;
 import java.net.Socket;
 
 /**
@@ -9,6 +13,23 @@ import java.net.Socket;
  * managing its own internal thread pool and memory buffers.
  */
 public class Worker {
+    public static void main(String[] args) throws IOException {
+        int port = 9000;
+        ServerSocket server = new ServerSocket(port);
+        System.out.println("Worker started, listening on port " + port);
+
+        Socket client = server.accept();
+        InputStream in = client.getInputStream();
+        OutputStream out = client.getOutputStream();
+
+        String msg = Message.unpackString(in);
+        System.out.println("Received message from master: " + msg);
+        
+        Message.packString("Hello Master, this is Worker!", out);
+
+        client.close();
+        server.close();
+    }
 
     /**
      * Connects to the Master and initiates the registration handshake.

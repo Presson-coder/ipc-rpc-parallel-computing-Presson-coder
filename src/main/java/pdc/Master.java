@@ -1,7 +1,8 @@
 package pdc;
 
 import java.io.IOException;
-import java.net.ServerSocket;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.Socket;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,6 +31,24 @@ public class Master {
      *                  "BLOCK_MULTIPLY")
      * @param data      The raw matrix data to be processed
      */
+
+    public static void main(String[] args) throws IOException {
+        String host = "localhost";
+        int port = 9000;
+        Socket worker = new Socket(host, port);
+
+        OutputStream out = worker.getOutputStream();
+        InputStream in = worker.getInputStream();
+
+        Message.packString("hello worker 1", out);
+
+        String reply = Message.unpackString(in);
+        System.out.println("Received message from worker: " + reply);
+
+        worker.close();
+    }
+
+
     public Object coordinate(String operation, int[][] data, int workerCount) {
         // TODO: Architect a scheduling algorithm that survives worker failure.
         // HINT: Think about how MapReduce or Spark handles 'Task Reassignment'.
