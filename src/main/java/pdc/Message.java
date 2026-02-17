@@ -2,148 +2,139 @@ package pdc;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 
-/**
- * Message represents the communication unit in the CSM218 protocol.
- * 
- * Requirement: You must implement a custom WIRE FORMAT.
- * DO NOT use JSON, XML, or standard Java Serialization.
- * Use a format that is efficient for the parallel distribution of matrix
- * blocks.
- */
 public class Message {
+
+    public static final String CSM218_MAGIC = "CSM218";
+
     public String magic;
     public int version;
-    public String messageType;
+    public String type;
     public String sender;
-    public String studentId;
     public long timestamp;
     public byte[] payload;
 
-    public static void packString(String msg, OutputStream out) throws IOException {
-        byte[] data = msg.getBytes("UTF-8");
-        DataOutputStream dos = new DataOutputStream(out);
-        dos.writeInt(data.length);
-        dos.write(data);
-        dos.flush();
-    }
+    public int messageType;
+    public String studentId;
 
-    public static String unpackString(InputStream in) throws IOException {
-        DataInputStream dis = new DataInputStream(in);
-        int len = dis.readInt();
-        byte[] data = new byte[len];
-        dis.readFully(data);
-        return new String(data, "UTF-8");
-    }
+    public Message() {}
 
-    public Message() {
-    }
+    // --------- Efficient ByteBuffer pack/unpack ----------
 
-    public static void packMatrix(int[][] matrix, OutputStream outputStream) throws IOException {
-        DataOutputStream dos = new DataOutputStream(outputStream);
-        int rows = matrix.length;
-        int cols = matrix[0].length;
-        dos.writeInt(rows);
-        dos.writeInt(cols);
-        for (int i = 0; i < rows; i++)
-            for (int j = 0; j < cols; j++)
-                dos.writeInt(matrix[i][j]);
-        dos.flush();
-    }
-
-    public static int[][] unpackMatrix(InputStream inputStream) throws IOException {
-        DataInputStream dis = new DataInputStream(inputStream);
-        int rows = dis.readInt();
-        int cols = dis.readInt();
-        int[][] matrix = new int[rows][cols];
-        for (int i = 0; i < rows; i++)
-            for (int j = 0; j < cols; j++)
-                matrix[i][j] = dis.readInt();
-        return matrix;
-    }
-
-    /**
-     * Converts the message to a byte stream for network transmission.
-     * Students must implement their own framing (e.g., length-prefixing).
-     */
     public byte[] pack() {
+        if (magic == null || magic.isBlank()) magic = CSM218_MAGIC;
+        if (version == 0) version = 1; // default version
+        if (studentId == null || studentId.isBlank()) studentId = resolveStudentId();
+        if (payload == null) payload = new byte[0];
+
+        byte[] magicB = magic.getBytes(StandardCharsets.UTF_8);
+        byte[] studentB = studentId.getBytes(StandardCharsets.UTF_8);
+        byte[] typeB = (type == null ? "" : type).getBytes(StandardCharsets.UTF_8);
+        byte[] senderB = (sender == null ? "" : sender).getBytes(StandardCharsets.UTF_8);
+        byte[] payloadB = payload;
+
+        int bodyLen =
+                4 + magicB.length +
+                4 +                 // version
+                4 +                 // messageType
+                4 + studentB.length +
+                4 + typeB.length +
+                4 + senderB.length +
+                8 +                 // timestamp
+                4 + payloadB.length;
+
+        ByteBuffer buf = ByteBuffer.allocate(4 + bodyLen);
+        buf.putInt(bodyLen);
+
+        putBytes(buf, magicB);
+        buf.putInt(version);
+        buf.putInt(messageType);
+        putBytes(buf, studentB);
+        putBytes(buf, typeB);
+        putBytes(buf, senderB);
+        buf.putLong(timestamp);
+        putBytes(buf, payloadB);
+
+        return buf.array();
+    }
+
+    public static Message unpack(byte[] data) {
+        if (data == null || data.length < 4) return null;
+
+        ByteBuffer buf = ByteBuffer.wrap(data);
+        int frameLen = buf.getInt();
+        if (frameLen < 0 || data.length < 4 + frameLen) return null;
+
+        Message m = new Message();
+        m.magic = getString(buf);
+        if (!CSM218_MAGIC.equals(m.magic)) return null; // validate magic
+
+        m.version = buf.getInt();
+        m.messageType = buf.getInt();
+        m.studentId = getString(buf);
+        m.type = getString(buf);
+        m.sender = getString(buf);
+        m.timestamp = buf.getLong();
+        m.payload = getBytes(buf);
+        return m;
+    }
+
+    private static void putBytes(ByteBuffer buf, byte[] b) {
+        buf.putInt(b.length);
+        buf.put(b);
+    }
+
+    private static byte[] getBytes(ByteBuffer buf) {
+        int len = buf.getInt();
+        if (len < 0 || len > buf.remaining()) throw new IllegalArgumentException("Bad length");
+        byte[] out = new byte[len];
+        buf.get(out);
+        return out;
+    }
+
+    private static String getString(ByteBuffer buf) {
+        return new String(getBytes(buf), StandardCharsets.UTF_8);
+    }
+
+    // --------- TCP stream safe helpers ----------
+
+    public static Message readFrom(DataInputStream in) throws IOException {
         try {
-            byte[] magicBytes = magic.getBytes("UTF-8");
-            byte[] messageTypeBytes = messageType.getBytes("UTF-8");
-            byte[] senderBytes = sender.getBytes("UTF-8");
-            byte[] studentIdBytes = (studentId != null ? studentId.getBytes("UTF-8") : new byte[0]);
-            int payloadLength = (payload != null) ? payload.length : 0;
+            int frameLen = in.readInt();
+            if (frameLen < 0) throw new IOException("Negative frame length");
 
-            int totalLength = 4 + magicBytes.length + 4 + messageTypeBytes.length + 4 + senderBytes.length + 4
-                    + studentIdBytes.length + 8 + 4 + payloadLength + 4;
+            byte[] frame = new byte[4 + frameLen];
+            ByteBuffer.wrap(frame).putInt(frameLen);
+            
+            // Explicit loop for fragmentation handling (supports jumbo payloads > MTU)
+            int bytesRead = 0;
+            while (bytesRead < frameLen) {
+                int n = in.read(frame, 4 + bytesRead, frameLen - bytesRead);
+                if (n == -1) throw new EOFException("Connection closed during frame read");
+                bytesRead += n;
+            }
 
-            java.io.ByteArrayOutputStream byteArrayOutputStream = new java.io.ByteArrayOutputStream();
-            DataOutputStream dataOutputStream = new DataOutputStream(byteArrayOutputStream);
-            dataOutputStream.writeInt(totalLength); // length prefix (excluding itself)
-
-            dataOutputStream.writeInt(magicBytes.length);
-            dataOutputStream.write(magicBytes);
-            dataOutputStream.writeInt(version);
-            dataOutputStream.writeInt(messageTypeBytes.length);
-            dataOutputStream.write(messageTypeBytes);
-            dataOutputStream.writeInt(senderBytes.length);
-            dataOutputStream.write(senderBytes);
-            dataOutputStream.writeInt(studentIdBytes.length);
-            dataOutputStream.write(studentIdBytes);
-            dataOutputStream.writeLong(timestamp);
-            dataOutputStream.writeInt(payloadLength);
-            if (payloadLength > 0)
-                dataOutputStream.write(payload);
-            dataOutputStream.flush();
-            return byteArrayOutputStream.toByteArray();
-        } catch (IOException e) {
-            throw new RuntimeException("Message pack error", e);
+            return unpack(frame);
+        } catch (EOFException eof) {
+            return null;
         }
     }
 
-    /**
-     * Reconstructs a Message from a byte stream.
-     */
-    public static Message unpack(byte[] data) {
-        try {
-            DataInputStream dataInputStream = new DataInputStream(new java.io.ByteArrayInputStream(data));
-            int totalLength = dataInputStream.readInt();
-            int magicLength = dataInputStream.readInt();
-            byte[] magicBytes = new byte[magicLength];
-            dataInputStream.readFully(magicBytes);
-            String magic = new String(magicBytes, "UTF-8");
-            int version = dataInputStream.readInt();
-            int messageTypeLength = dataInputStream.readInt();
-            byte[] messageTypeBytes = new byte[messageTypeLength];
-            dataInputStream.readFully(messageTypeBytes);
-            String messageType = new String(messageTypeBytes, "UTF-8");
-            int senderLength = dataInputStream.readInt();
-            byte[] senderBytes = new byte[senderLength];
-            dataInputStream.readFully(senderBytes);
-            String sender = new String(senderBytes, "UTF-8");
-            int studentIdLength = dataInputStream.readInt();
-            byte[] studentIdBytes = new byte[studentIdLength];
-            dataInputStream.readFully(studentIdBytes);
-            String studentId = new String(studentIdBytes, "UTF-8");
-            long timestamp = dataInputStream.readLong();
-            int payloadLength = dataInputStream.readInt();
-            byte[] payload = new byte[payloadLength];
-            if (payloadLength > 0)
-                dataInputStream.readFully(payload);
-            Message message = new Message();
-            message.magic = magic;
-            message.version = version;
-            message.messageType = messageType;
-            message.sender = sender;
-            message.studentId = studentId;
-            message.timestamp = timestamp;
-            message.payload = payload;
-            return message;
-        } catch (IOException e) {
-            throw new RuntimeException("Message unpack error", e);
-        }
+    public void writeTo(DataOutputStream out) throws IOException {
+        out.write(pack());
+        out.flush();
+    }
+
+    private static String resolveStudentId() {
+        String v = System.getenv("CSM218_STUDENT_ID");
+        if (v == null || v.isBlank()) v = System.getenv("STUDENT_ID");
+        if (v == null || v.isBlank()) v = System.getenv("STUDENT_NO");
+        if (v == null || v.isBlank()) v = System.getenv("GITHUB_USERNAME");
+        return (v == null || v.isBlank()) ? "UNKNOWN" : v.trim();
     }
 }
+
